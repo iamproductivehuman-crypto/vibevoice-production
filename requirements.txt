@@ -1,9 +1,11 @@
-torch
-torchvision
-torchaudio
-transformers>=4.40.0
-accelerate
-soundfile
-librosa
-numpy
-paramiko
+# vibevoice-production — pinned dependency versions
+# These versions are verified to work together on CUDA 12.1 / RTX-series GPUs.
+# torch/torchvision/torchaudio are installed separately via the PyTorch index URL
+# (see install.sh step 2) to get the correct CUDA variant.
+
+transformers==4.51.3
+accelerate>=0.27.0
+soundfile>=0.12.1
+librosa>=0.10.0
+numpy<2.0
+paramiko>=3.0
