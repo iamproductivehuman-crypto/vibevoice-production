@@ -610,14 +610,35 @@ let currentJobId = null;
 window.addEventListener('DOMContentLoaded', boot);
 
 async function boot() {
+  // Step 1: Always check server auth status before showing anything.
+  // /health is always public — no key needed.
+  let authRequired = true;
+  try {
+    const h = await fetch(`${BASE}/health`).then(r => r.json());
+    authRequired = h.auth_enabled === true;
+  } catch {
+    // Server unreachable — default to showing lock screen so the user
+    // can see the error when they try to unlock.
+  }
+
+  if (!authRequired) {
+    // Auth is disabled on the server — bypass lock screen entirely.
+    apiKey = '';
+    localStorage.setItem('vv_key', '__noauth__');
+    document.getElementById('lock-screen').classList.add('hidden');
+    document.getElementById('app').style.display = '';
+    initApp();
+    return;
+  }
+
+  // Auth is required — show lock screen.
+  // Pre-fill any previously stored key and attempt silent auto-unlock.
   const stored = localStorage.getItem('vv_key') || '';
-  if (stored !== '__noauth__') {
+  if (stored && stored !== '__noauth__') {
     document.getElementById('lock-input').value = stored;
+    await tryUnlock(stored, false);   // silent: no error shown on stale keys
   }
-  // Auto-unlock if a key is stored
-  if (stored) {
-    await tryUnlock(stored === '__noauth__' ? '' : stored, false);
-  }
+  // If tryUnlock succeeded it hid the lock screen; otherwise it stays visible.
 }
 
 async function unlock() {
