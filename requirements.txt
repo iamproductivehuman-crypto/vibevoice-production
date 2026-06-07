@@ -1,13 +1,25 @@
 # vibevoice-production — pinned dependency manifest
-# PyTorch is installed separately via the PyTorch index URL (see install.sh step 2)
-# to get the correct CUDA variant. These are all other pinned deps.
+#
+# PyTorch is installed separately via the PyTorch index URL (see install.sh
+# step 2) to get the correct CUDA variant. All other deps are listed here.
+#
+# Install everything:
+#   pip install -r requirements.txt
 
 torch==2.5.1
 transformers==4.51.3
-# accelerate: no specific version required by VibeVoice or transformers 4.51.3.
-# Floor of 1.6.0 is proven working (imports, model load, generation all pass).
+
+# accelerate: VibeVoice and transformers 4.51.3 have no strict patch
+# requirement. Floor of 1.6.0 is proven working (imports, model load,
+# generation all pass).
 accelerate>=1.6.0
+
 soundfile>=0.12.1
 librosa>=0.10.0
 numpy<2.0
 paramiko>=3.0
+
+# API server
+fastapi>=0.115
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
