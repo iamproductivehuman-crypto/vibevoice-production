@@ -1,0 +1,3 @@
+# This file keeps the uploaded_voices/ directory tracked by git.
+# Custom voice files uploaded via the browser UI are stored here.
+# They are excluded from git via .gitignore — only this placeholder is committed.

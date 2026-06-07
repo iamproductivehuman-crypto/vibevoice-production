@@ -47,14 +47,30 @@ Endpoints:
 
 Open `http://YOUR_IP:8000/ui` in your browser.
 
-**Workflow:**
-1. Upload a folder of `.txt` scripts
-2. Select a voice from the dropdown (or upload a custom `.wav`)
-3. Click **Generate All**
-4. Watch live progress per script
-5. Download individual WAVs or a ZIP of all
+**If `API_KEY` is set:** the UI shows a login screen. Enter your key once — it's stored in `localStorage`. All API requests automatically include it. No way to consume the GPU without it.
 
-Supports 100+ scripts in a single batch.
+**Full workflow:**
+1. Enter API key → unlocked and stored locally
+2. Upload a folder of `.txt` scripts
+3. Select a voice from dropdown (**Built-in Voices** / **Custom Voices** grouped separately)
+4. **Test Voice** — type a sentence, click Preview, hear it before committing
+5. Click **Generate All** → watch live per-script progress + queue indicator
+6. Download individual WAVs or **Download ZIP** (all files in one click)
+7. **History panel** at bottom — persists across page refreshes via `history.json`
+
+## Voice Directories
+
+| Directory | Purpose | Survives VibeVoice update? |
+|-----------|---------|---|
+| `voices/` | Committed to git; copied to `VibeVoice/demo/voices/` on install | No (re-copied on install) |
+| `uploaded_voices/` | Custom voices uploaded via UI or copied manually | **Yes — completely separate** |
+
+To add a voice without the UI:
+```bash
+cp narrator.wav vibevoice-production/uploaded_voices/
+```
+
+The UI shows both groups separately in the voice dropdown.
 
 ## Endpoints
 

@@ -13,6 +13,10 @@
 #      AUTO_START_SERVER=1 bash install.sh  # same as --start-server
 #      API_KEY=mysecret   bash install.sh   # set auth key before starting
 #      PORT=8000          bash install.sh   # override server port (default: 8000)
+#
+#  Voice directories (after install):
+#      voices/            — checked into git, copied to VibeVoice/demo/voices
+#      uploaded_voices/   — custom voices uploaded via UI; survives VibeVoice updates
 # =============================================================================
 set -euo pipefail
 
@@ -193,15 +197,17 @@ python "${SCRIPT_DIR}/patch.py" 2>&1 | tee -a "${LOG_FILE}"
 log ""
 log "[6/9] Copying voices..."
 mkdir -p "${VIBE_DIR}/demo/voices"
+mkdir -p "${SCRIPT_DIR}/uploaded_voices"    # persistent custom voices directory
 VOICES_SRC="${SCRIPT_DIR}/voices"
 if ls "${VOICES_SRC}"/*.{wav,mp3,flac,ogg} 2>/dev/null | grep -q .; then
     cp "${VOICES_SRC}"/*.{wav,mp3,flac,ogg} "${VIBE_DIR}/demo/voices/" 2>/dev/null || true
     COUNT=$(ls "${VIBE_DIR}/demo/voices" | wc -l)
-    log "  ${COUNT} voice file(s) copied."
+    log "  ${COUNT} built-in voice file(s) copied to VibeVoice/demo/voices/."
 else
-    log "  No custom voices in ${VOICES_SRC}/ — add .wav/.mp3 files before generating."
-    log "  You can also upload voices via the browser UI after the server starts."
+    log "  No voices in ${VOICES_SRC}/ — that's OK."
 fi
+log "  Custom voices go to: ${SCRIPT_DIR}/uploaded_voices/"
+log "  (Upload via browser UI, or copy files manually to uploaded_voices/)"
 
 # ── Step 7 — Download model ───────────────────────────────────────────────────
 log ""

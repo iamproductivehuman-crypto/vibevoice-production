@@ -6,7 +6,10 @@ output/
 api_output/
 install.log
 server.log
+history.json
 *.wav
 *.mp3
 !voices/*.wav
 !voices/*.mp3
+uploaded_voices/*
+!uploaded_voices/.gitkeep

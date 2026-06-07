@@ -64,21 +64,47 @@ SERVER_IP=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null \
     || hostname -I 2>/dev/null | awk '{print $1}' \
     || echo "localhost")
 
+# Detect SSH port (Vast.ai uses a non-standard port)
+SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "22")
+if [ -z "${SSH_PORT}" ] || [ "${SSH_PORT}" = "" ]; then
+    SSH_PORT="22"
+fi
+
+# Detect Vast.ai environment
+IS_VAST=false
+if [ -f "/etc/vast_containerlabel" ] || [ -n "${VAST_CONTAINERLABEL:-}" ] || [ -n "${VAST_TCP_PORT_8080:-}" ]; then
+    IS_VAST=true
+fi
+
 echo ""
 echo "============================================================"
-echo "  VibeVoice API Server"
+echo "  VibeVoice API Server  v3"
 echo "  Listening: http://${HOST}:${PORT}"
-echo "  Public:    http://${SERVER_IP}:${PORT}"
+echo "  Public IP: ${SERVER_IP}"
 echo ""
-echo "  Endpoints:"
-echo "    GET  http://${SERVER_IP}:${PORT}/health"
-echo "    GET  http://${SERVER_IP}:${PORT}/voices"
-echo "    GET  http://${SERVER_IP}:${PORT}/ui           (browser UI)"
-echo "    POST http://${SERVER_IP}:${PORT}/generate"
-echo "    POST http://${SERVER_IP}:${PORT}/generate_url"
-echo "    POST http://${SERVER_IP}:${PORT}/batch_generate"
-echo "    POST http://${SERVER_IP}:${PORT}/upload_voice"
-echo "    GET  http://${SERVER_IP}:${PORT}/docs         (Swagger UI)"
+echo "  Open in browser (via SSH tunnel):"
+echo "    http://localhost:${PORT}/"
+echo "    http://localhost:${PORT}/ui"
+echo ""
+echo "  SSH Tunnel command (run this on your LOCAL machine):"
+echo "    ssh -p ${SSH_PORT} root@${SERVER_IP} -L ${PORT}:localhost:${PORT}"
+echo ""
+if [ "${IS_VAST}" = "true" ]; then
+echo "  Vast.ai detected. Find your SSH port in the Vast.ai dashboard."
+echo "  The port shown above (${SSH_PORT}) is from /etc/ssh/sshd_config."
+echo "  If it differs, use the port shown in your Vast.ai instance panel."
+echo ""
+fi
+echo "  All Endpoints:"
+echo "    GET  http://localhost:${PORT}/          (homepage)"
+echo "    GET  http://localhost:${PORT}/health"
+echo "    GET  http://localhost:${PORT}/voices"
+echo "    GET  http://localhost:${PORT}/ui           (browser UI)"
+echo "    POST http://localhost:${PORT}/generate"
+echo "    POST http://localhost:${PORT}/generate_url"
+echo "    POST http://localhost:${PORT}/batch_generate"
+echo "    POST http://localhost:${PORT}/upload_voice"
+echo "    GET  http://localhost:${PORT}/docs         (Swagger UI)"
 echo "============================================================"
 echo ""
 
