@@ -1,0 +1,9 @@
+torch
+torchvision
+torchaudio
+transformers>=4.40.0
+accelerate
+soundfile
+librosa
+numpy
+paramiko

@@ -1,0 +1,9 @@
+VibeVoice/
+*.pyc
+__pycache__/
+.batch_progress.json
+output/
+*.wav
+*.mp3
+!voices/*.wav
+!voices/*.mp3
