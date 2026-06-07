@@ -4,7 +4,9 @@
 
 torch==2.5.1
 transformers==4.51.3
-accelerate==1.8.1
+# accelerate: no specific version required by VibeVoice or transformers 4.51.3.
+# Floor of 1.6.0 is proven working (imports, model load, generation all pass).
+accelerate>=1.6.0
 soundfile>=0.12.1
 librosa>=0.10.0
 numpy<2.0

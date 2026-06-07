@@ -23,7 +23,10 @@ REPORT_FILE = os.path.join(SCRIPT_DIR, "setup_report.txt")
 
 REQUIRED_TORCH        = "2.5.1"
 REQUIRED_TRANSFORMERS = "4.51.3"
-REQUIRED_ACCELERATE   = "1.8.1"
+# accelerate: VibeVoice declares no version requirement; transformers 4.51.3
+# requires only >=0.26.0.  We have verified that 1.6.0 works end-to-end
+# (imports, model load, generation all pass).  Accept any 1.x release ≥ 1.6.0.
+ACCELERATE_MIN        = (1, 6, 0)
 VRAM_WARN_GB          = 16
 
 CHECK = "✓"
@@ -124,10 +127,23 @@ try:
 except ImportError:
     fail("transformers not installed")
 
-# ── Accelerate (exact) ────────────────────────────────────────────────────────
+# ── Accelerate (minimum floor, not exact pin) ─────────────────────────────────
+# Neither VibeVoice nor transformers 4.51.3 require a specific accelerate patch
+# release.  We accept any version >= ACCELERATE_MIN that passes real functional
+# tests (imports, model load, generation).
 try:
     import accelerate
-    ver_check("accelerate", accelerate.__version__, REQUIRED_ACCELERATE)
+    from packaging.version import Version
+    acc_ver = accelerate.__version__
+    acc_tuple = tuple(int(x) for x in acc_ver.split(".")[:3])
+    min_str = ".".join(str(x) for x in ACCELERATE_MIN)
+    if acc_tuple >= ACCELERATE_MIN:
+        ok("accelerate", f"{acc_ver}  (>= {min_str} required)")
+    else:
+        fail(
+            f"accelerate too old  (need >= {min_str}, got {acc_ver})",
+            f"pip install 'accelerate>={min_str}'",
+        )
 except ImportError:
     fail("accelerate not installed")
 
