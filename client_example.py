@@ -5,7 +5,7 @@ Shows how to call every endpoint from Python.
 
     python client_example.py                     # runs all examples
     python client_example.py --host myserver.io  # remote server
-    python client_example.py --url http://localhost:8080
+    python client_example.py --url http://localhost:8000
 
 Requires: requests  (pip install requests)
 """
@@ -27,7 +27,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--url",  default="http://localhost:8080",
+    p.add_argument("--url",  default="http://localhost:8000",
                    help="Base URL of the VibeVoice API server")
     p.add_argument("--voice", default="en-Alice_woman",
                    help="Voice to use in examples")

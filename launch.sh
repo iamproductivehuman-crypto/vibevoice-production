@@ -3,7 +3,7 @@
 #  launch.sh — One-command VibeVoice launcher
 #
 #  This is the single entry point for running VibeVoice on a fresh instance.
-#  It verifies the installation, then starts the server.
+#  It verifies the installation, then starts the server on port 8000.
 #
 #  Usage:
 #      bash launch.sh              # foreground (Ctrl-C to stop)
@@ -12,8 +12,7 @@
 #  If VibeVoice is not installed, runs install.sh first automatically.
 #
 #  Environment variables:
-#      PORT=8000                   # override listen port
-#      API_KEY=mysecret            # enable API key protection
+#      PORT=8000                   # override listen port (default: 8000)
 #      CLEANUP_RETENTION_HOURS=24  # hours to keep generated WAV files
 # =============================================================================
 set -euo pipefail
@@ -26,6 +25,8 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m'
+
+PORT="${PORT:-8000}"
 
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════╗${NC}"
@@ -63,13 +64,11 @@ else
     echo -e "${YELLOW}⚠  No CUDA GPU detected. Generation will be very slow on CPU.${NC}"
 fi
 
-# ── Step 5: Check model ───────────────────────────────────────────────────────
-MODEL_PATH="${VIBEVOICE_MODEL:-microsoft/VibeVoice-1.5B}"
+# ── Step 5: Check model cache ────────────────────────────────────────────────
 if python -c "
 from pathlib import Path
 import os
 model = os.getenv('VIBEVOICE_MODEL', 'microsoft/VibeVoice-1.5B')
-# Check HuggingFace cache
 cache = Path.home() / '.cache' / 'huggingface' / 'hub'
 slug = 'models--' + model.replace('/', '--')
 cached = (cache / slug).is_dir()
@@ -80,26 +79,38 @@ else
     echo -e "${YELLOW}⚠  Model not cached — will download on first request (~6 GB)${NC}"
 fi
 
-# ── Step 6: Check API key ─────────────────────────────────────────────────────
-if [ -z "${API_KEY:-}" ]; then
-    echo ""
-    echo -e "${YELLOW}╔══════════════════════════════════════════════════╗${NC}"
-    echo -e "${YELLOW}║  ⚠  WARNING: API_KEY is not set!               ║${NC}"
-    echo -e "${YELLOW}║  This server will be PUBLICLY accessible.       ║${NC}"
-    echo -e "${YELLOW}║  Anyone with the URL can use your GPU.          ║${NC}"
-    echo -e "${YELLOW}║                                                  ║${NC}"
-    echo -e "${YELLOW}║  To enable auth, restart with:                  ║${NC}"
-    echo -e "${YELLOW}║    API_KEY=mysecret bash launch.sh              ║${NC}"
-    echo -e "${YELLOW}╚══════════════════════════════════════════════════╝${NC}"
-    echo ""
-    sleep 2
+# ── Step 6: Check static UI ──────────────────────────────────────────────────
+if [ -f "${SCRIPT_DIR}/static/index.html" ]; then
+    echo -e "${GREEN}✓  Static UI found${NC}"
 else
-    echo -e "${GREEN}✓  API key authentication is enabled${NC}"
+    echo -e "${YELLOW}⚠  static/index.html not found — UI may not load${NC}"
 fi
 
 echo ""
-echo -e "${GREEN}All checks passed. Starting server...${NC}"
+echo -e "${GREEN}All checks passed. Starting server on port ${PORT}...${NC}"
 echo ""
 
-# ── Step 7: Delegate to start_server.sh ──────────────────────────────────────
+# ── Step 7: Print access instructions ────────────────────────────────────────
+# Detect SSH port for tunnel instructions
+SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "<PORT>")
+if [ -z "${SSH_PORT}" ]; then SSH_PORT="<PORT>"; fi
+
+echo "================================================"
+echo " VibeVoice Ready"
+echo "================================================"
+echo ""
+echo " Local UI:    http://localhost:${PORT}/ui/"
+echo " Health:      http://localhost:${PORT}/health"
+echo " Docs:        http://localhost:${PORT}/docs"
+echo ""
+echo " If using SSH tunnel, run this on your LOCAL machine:"
+echo ""
+echo "   ssh -p ${SSH_PORT} root@<HOST> -L ${PORT}:localhost:${PORT}"
+echo ""
+echo " Then open:   http://localhost:${PORT}/ui/"
+echo ""
+echo "================================================"
+echo ""
+
+# ── Step 8: Delegate to start_server.sh ──────────────────────────────────────
 exec bash "${SCRIPT_DIR}/start_server.sh" "$@"

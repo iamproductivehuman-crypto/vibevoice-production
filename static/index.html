@@ -61,36 +61,6 @@
 
     .shell { position:relative; z-index:1; max-width:1100px; margin:0 auto; padding:32px 20px 100px; }
 
-    /* ── Lock screen ── */
-    #lock-screen {
-      position:fixed; inset:0; z-index:999;
-      background:rgba(9,10,13,.97);
-      backdrop-filter:blur(20px);
-      display:flex; align-items:center; justify-content:center;
-    }
-    #lock-screen.hidden { display:none; }
-    .lock-card {
-      background:rgba(255,255,255,.04);
-      border:1px solid var(--border-a);
-      border-radius:var(--r-lg);
-      padding:40px 36px;
-      width:100%; max-width:420px;
-      box-shadow:0 24px 64px rgba(0,0,0,.5);
-      text-align:center;
-    }
-    .lock-icon { font-size:44px; margin-bottom:14px; }
-    .lock-card h2 {
-      font-size:1.4rem; font-weight:700;
-      background:var(--grad); -webkit-background-clip:text;
-      -webkit-text-fill-color:transparent; background-clip:text;
-      margin-bottom:8px;
-    }
-    .lock-card p { color:var(--txt2); font-size:.85rem; margin-bottom:6px; }
-    .lock-card .lock-note { color:var(--txt3); font-size:.75rem; margin-bottom:22px; }
-    .lock-row { display:flex; gap:8px; margin-bottom:12px; }
-    .lock-row input { flex:1; }
-    #lock-error { color:var(--err); font-size:.8rem; margin-top:6px; }
-
     /* ── Header ── */
     header {
       display:flex; align-items:center; justify-content:space-between;
@@ -150,7 +120,7 @@
       color:var(--txt2); margin-bottom:5px;
       text-transform:uppercase; letter-spacing:.05em;
     }
-    input[type="text"], input[type="password"], select, textarea {
+    input[type="text"], select, textarea {
       width:100%; background:var(--bg-input); border:1px solid var(--border);
       border-radius:var(--r-sm); color:var(--txt);
       padding:9px 11px; font-family:inherit; font-size:.875rem;
@@ -414,36 +384,9 @@
 <body>
 
 <!-- ════════════════════════════════════════
-     LOCK SCREEN
+     MAIN APP — loads immediately, no auth gate
 ════════════════════════════════════════ -->
-<div id="lock-screen">
-  <div class="lock-card">
-    <div class="lock-icon">🔐</div>
-    <h2>VibeVoice Studio</h2>
-    <p>Enter your API key to access the studio.</p>
-    <p class="lock-note">Leave blank if no API_KEY is configured on the server.</p>
-    <div class="lock-row">
-      <input type="password" id="lock-input" placeholder="your-api-key" autocomplete="off"
-             onkeydown="if(event.key==='Enter')unlock()" />
-      <button class="btn btn-primary" id="unlock-btn" onclick="unlock()">Unlock →</button>
-    </div>
-    <div id="lock-error" class="hidden" style="color:var(--err);font-size:.8rem;margin-top:8px;"></div>
-  </div>
-</div>
-
-<!-- ════════════════════════════════════════
-     MAIN APP
-════════════════════════════════════════ -->
-<div class="shell" id="app" style="display:none">
-
-  <!-- Auth warning banner (shown when no API key) -->
-  <div id="auth-warning" class="hidden"
-    style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);border-radius:10px;
-           padding:11px 16px;font-size:.8rem;color:#fcd34d;margin-bottom:18px;">
-    ⚠️ <strong>No API key set</strong> — this server is publicly accessible.
-    Set <code style="background:rgba(255,255,255,.1);border-radius:3px;padding:1px 4px">API_KEY</code>
-    and restart the server to enable protection.
-  </div>
+<div class="shell" id="app">
 
   <!-- Header -->
   <header>
@@ -597,7 +540,6 @@
 //  Config
 // ============================================================
 const BASE = window.location.origin;
-let apiKey = '';
 let scripts = [];
 let results = {};
 let isRunning = false;
@@ -605,112 +547,23 @@ let shouldStop = false;
 let currentJobId = null;
 
 // ============================================================
-//  Boot
+//  Boot — no auth, load immediately
 // ============================================================
-window.addEventListener('DOMContentLoaded', boot);
-
-async function boot() {
-  // Step 1: Always check server auth status before showing anything.
-  // /health is always public — no key needed.
-  let authRequired = true;
-  try {
-    const h = await fetch(`${BASE}/health`).then(r => r.json());
-    authRequired = h.auth_enabled === true;
-  } catch {
-    // Server unreachable — default to showing lock screen so the user
-    // can see the error when they try to unlock.
-  }
-
-  if (!authRequired) {
-    // Auth is disabled on the server — bypass lock screen entirely.
-    apiKey = '';
-    localStorage.setItem('vv_key', '__noauth__');
-    document.getElementById('lock-screen').classList.add('hidden');
-    document.getElementById('app').style.display = '';
-    initApp();
-    return;
-  }
-
-  // Auth is required — show lock screen.
-  // Pre-fill any previously stored key and attempt silent auto-unlock.
-  const stored = localStorage.getItem('vv_key') || '';
-  if (stored && stored !== '__noauth__') {
-    document.getElementById('lock-input').value = stored;
-    await tryUnlock(stored, false);   // silent: no error shown on stale keys
-  }
-  // If tryUnlock succeeded it hid the lock screen; otherwise it stays visible.
-}
-
-async function unlock() {
-  const key = document.getElementById('lock-input').value.trim();
-  await tryUnlock(key, true);
-}
-
-async function tryUnlock(key, showErrors) {
-  const btn = document.getElementById('unlock-btn');
-  const err = document.getElementById('lock-error');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>';
-  err.classList.add('hidden');
-
-  try {
-    const res = await fetch(`${BASE}/health`, {
-      headers: key ? { 'X-API-Key': key } : {},
-    });
-
-    if (res.status === 401) {
-      if (showErrors) {
-        err.textContent = '❌ Invalid API key.';
-        err.classList.remove('hidden');
-      }
-      return;
-    }
-
-    // 200 or any non-401 (e.g. server has no auth)
-    apiKey = key;
-    localStorage.setItem('vv_key', key || '__noauth__');
-    document.getElementById('lock-screen').classList.add('hidden');
-    document.getElementById('app').style.display = '';
-    initApp();
-
-  } catch (e) {
-    if (showErrors) {
-      err.textContent = `❌ Cannot reach server: ${e.message}`;
-      err.classList.remove('hidden');
-    }
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = 'Unlock →';
-  }
-}
-
-function initApp() {
+window.addEventListener('DOMContentLoaded', () => {
   loadVoices();
   loadHistory();
   checkHealth();
   setInterval(pollHealth, 8000);
-}
+});
 
 // ============================================================
-//  API helpers
+//  API helpers — no API key logic
 // ============================================================
-function hdr(extra = {}) {
-  const h = { 'Content-Type': 'application/json', ...extra };
-  if (apiKey) h['X-API-Key'] = apiKey;
-  return h;
-}
-
 async function api(path, opts = {}) {
   const res = await fetch(`${BASE}${path}`, {
     ...opts,
-    headers: { ...hdr(), ...(opts.headers || {}) },
+    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
   });
-  if (res.status === 401) {
-    // Key expired or changed — force re-login
-    localStorage.removeItem('vv_key');
-    location.reload();
-    throw new Error('Unauthorized');
-  }
   if (!res.ok) {
     const b = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(b.detail || `HTTP ${res.status}`);
@@ -726,7 +579,7 @@ async function checkHealth() {
   const txt = document.getElementById('stxt');
   dot.className = 'dot loading';
   try {
-    const h = await api('/health');
+    const h = await fetch(`${BASE}/health`).then(r => r.json());
     dot.className  = 'dot online';
     txt.textContent = h.model_loaded
       ? `Online · ${h.gpu_name || 'GPU'}`
@@ -736,10 +589,6 @@ async function checkHealth() {
     document.getElementById('queue-count').textContent = h.queue_length ?? 0;
     if ((h.queue_length ?? 0) > 0) qb.classList.remove('hidden');
     else qb.classList.add('hidden');
-    // Show auth warning if auth is disabled
-    const wb = document.getElementById('auth-warning');
-    if (!h.auth_enabled) wb.classList.remove('hidden');
-    else wb.classList.add('hidden');
   } catch {
     dot.className  = 'dot error';
     txt.textContent = 'Offline';
@@ -752,7 +601,7 @@ async function openHealth() {
   const el = document.getElementById('health-content');
   el.textContent = 'Loading…';
   try {
-    const h = await api('/health');
+    const h = await fetch(`${BASE}/health`).then(r => r.json());
     const rows = [
       ['Status',       h.status ?? '—'],
       ['Model Loaded', h.model_loaded ? '✅ Yes' : '❌ No'],
@@ -819,9 +668,7 @@ async function uploadVoice(input) {
   try {
     const form = new FormData();
     form.append('file', file);
-    const h = {};
-    if (apiKey) h['X-API-Key'] = apiKey;
-    const res = await fetch(`${BASE}/upload_voice`, { method:'POST', headers:h, body:form });
+    const res = await fetch(`${BASE}/upload_voice`, { method:'POST', body:form });
     if (!res.ok) { const b = await res.json().catch(()=>({})); throw new Error(b.detail || `HTTP ${res.status}`); }
     const d = await res.json();
     renderVoices(d.voices, false);
@@ -981,17 +828,7 @@ async function startBatch() {
   document.getElementById('zip-server-btn').style.display = 'none';
   document.getElementById('prog-wrap').classList.add('show');
 
-  // Build batch request
-  const items = scripts.map(s => ({
-    text: s.content, voice, cfg_scale: cfg, ddpm_steps: steps,
-    output_filename: `${s.name}.wav`,
-  }));
-
   let done=0, failed=0, totalDur=0, rtfSum=0, rtfN=0;
-
-  // Use /batch_generate for server-side orchestration + ZIP
-  // But we still want per-item progress in the UI.
-  // Strategy: call /generate_url per item (live progress), then track job manually.
 
   for (let i=0; i<scripts.length; i++) {
     if (shouldStop) break;
@@ -1004,8 +841,6 @@ async function startBatch() {
         method:'POST',
         body: JSON.stringify({ text:s.content, voice, cfg_scale:cfg, ddpm_steps:steps }),
       });
-      // Override filename with script name for clarity
-      data.filename = data.filename;
       results[s.name] = data;
       done++;
       totalDur += data.duration_s || 0;
@@ -1038,6 +873,7 @@ async function startBatch() {
   }
 
   loadHistory();
+}
 
 function stopBatch() {
   shouldStop = true;
@@ -1054,7 +890,7 @@ function updateProgress(cur, total, lbl) {
 }
 
 // ============================================================
-//  ZIP download  — client-side (inline, no JSZip CDN needed)
+//  ZIP download — client-side (inline, no JSZip CDN needed)
 // ============================================================
 async function downloadClientZip() {
   const btn = document.getElementById('zip-server-btn');
@@ -1066,16 +902,12 @@ async function downloadClientZip() {
   if (!entries.length) { toast('No files to zip.','err'); btn.disabled=false; btn.textContent=orig; return; }
 
   try {
-    // Fetch all files
     const blobs = await Promise.all(entries.map(async ([name, r]) => {
-      const res = await fetch(`${BASE}${r.url}`, { headers: apiKey ? {'X-API-Key':apiKey} : {} });
+      const res = await fetch(`${BASE}${r.url}`);
       if (!res.ok) throw new Error(`Failed ${r.filename}`);
       return { name: r.filename, blob: await res.blob() };
     }));
 
-    // Build ZIP manually using the Compression Streams API (native, no library)
-    // Fallback: just download files individually if browser lacks support.
-    // Actually use a simple uncompressed ZIP (no library needed):
     const zipBlob = await buildZip(blobs);
     const url = URL.createObjectURL(zipBlob);
     const a = Object.assign(document.createElement('a'), {
@@ -1121,20 +953,19 @@ async function buildZip(files) {
   for (const { name, blob } of files) {
     const data    = new Uint8Array(await blob.arrayBuffer());
     const nameEnc = enc.encode(name);
-    const crc     = _crc32(data);   // real CRC32
+    const crc     = _crc32(data);
 
-    // Local file header
     const lh = new Uint8Array([
-      0x50,0x4B,0x03,0x04,  // signature
-      20,0,                  // version needed
-      0,0,                   // flags
-      0,0,                   // compression: STORED
-      0,0,0,0,               // mod time/date (zeroed)
+      0x50,0x4B,0x03,0x04,
+      20,0,
+      0,0,
+      0,0,
+      0,0,0,0,
       ...u32le(crc),
       ...u32le(data.length),
       ...u32le(data.length),
       ...u16le(nameEnc.length),
-      0,0,                   // extra field length
+      0,0,
       ...nameEnc,
     ]);
 
@@ -1143,26 +974,25 @@ async function buildZip(files) {
     offset += lh.length + data.length;
   }
 
-  // Central directory
   const cdChunks = [];
   let cdSize = 0;
   for (const { name, nameEnc, crc, size, offset: lOffset } of localHeaders) {
     const cd = new Uint8Array([
-      0x50,0x4B,0x01,0x02,  // signature
-      20,0,                  // version made by
-      20,0,                  // version needed
-      0,0,                   // flags
-      0,0,                   // compression: STORED
-      0,0,0,0,               // mod time/date
+      0x50,0x4B,0x01,0x02,
+      20,0,
+      20,0,
+      0,0,
+      0,0,
+      0,0,0,0,
       ...u32le(crc),
       ...u32le(size),
       ...u32le(size),
       ...u16le(nameEnc.length),
-      0,0,                   // extra
-      0,0,                   // comment
-      0,0,                   // disk start
-      0,0,                   // internal attr
-      0,0,0,0,               // external attr
+      0,0,
+      0,0,
+      0,0,
+      0,0,
+      0,0,0,0,
       ...u32le(lOffset),
       ...nameEnc,
     ]);
@@ -1170,7 +1000,6 @@ async function buildZip(files) {
     cdSize += cd.length;
   }
 
-  // End of central directory
   const eocd = new Uint8Array([
     0x50,0x4B,0x05,0x06,
     0,0,0,0,
