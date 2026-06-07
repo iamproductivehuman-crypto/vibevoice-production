@@ -3,6 +3,9 @@ VibeVoice/
 __pycache__/
 .batch_progress.json
 output/
+api_output/
+install.log
+server.log
 *.wav
 *.mp3
 !voices/*.wav

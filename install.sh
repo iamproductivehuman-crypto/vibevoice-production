@@ -4,25 +4,36 @@
 #  Target: fresh Vast.ai CUDA 12.x instance (RTX 3090 / RTX 4090 recommended)
 #
 #  Usage:
-#      git clone https://github.com/YOUR_USERNAME/vibevoice-production.git
+#      git clone https://github.com/iamproductivehuman-crypto/vibevoice-production.git
 #      cd vibevoice-production
-#      bash install.sh
+#      bash install.sh                     # install only
+#      bash install.sh --start-server      # install and start API automatically
+#
+#  Environment:
+#      AUTO_START_SERVER=1 bash install.sh  # same as --start-server
+#      API_KEY=mysecret   bash install.sh   # set auth key before starting
+#      PORT=8000          bash install.sh   # override server port (default: 8000)
 # =============================================================================
 set -euo pipefail
 
+# ── Parse flags ───────────────────────────────────────────────────────────────
+START_SERVER="${AUTO_START_SERVER:-0}"
+for arg in "$@"; do
+    case "${arg}" in
+        --start-server) START_SERVER=1 ;;
+        *) echo "Unknown argument: ${arg}"; exit 1 ;;
+    esac
+done
+
 # ── Pinned versions ───────────────────────────────────────────────────────────
 REPO_URL="https://github.com/harry2141985/VibeVoice.git"
-VIBE_COMMIT="HEAD"          # ← replace with exact SHA after first verified run
-                             #   e.g. VIBE_COMMIT="a3f8c21"
-                             #   find it with: git -C VibeVoice rev-parse HEAD
+VIBE_COMMIT="4b9af0f4dab7f250ad5bb79bcb443315dc3bba54"
 
 TORCH_VERSION="2.5.1"
 TORCH_CUDA_TAG="cu121"      # matches CUDA 12.1 driver (also works on 12.x)
 TORCH_INDEX="https://download.pytorch.org/whl/${TORCH_CUDA_TAG}"
 
 TRANSFORMERS_VERSION="4.51.3"
-# accelerate: no specific patch version required by VibeVoice or
-# transformers 4.51.3.  Minimum 1.6.0 is proven working.
 ACCELERATE_MIN="1.6.0"
 
 MODEL_ID="microsoft/VibeVoice-1.5B"
@@ -75,7 +86,7 @@ fi
 
 # ── Step 1 — Clone VibeVoice ─────────────────────────────────────────────────
 log ""
-log "[1/9] Cloning VibeVoice fork (harry2141985)..."
+log "[1/9] Cloning VibeVoice fork (harry2141985) @ ${VIBE_COMMIT}..."
 
 if [ ! -d "${VIBE_DIR}" ]; then
     git clone "${REPO_URL}" "${VIBE_DIR}" 2>&1 | tee -a "${LOG_FILE}"
@@ -84,14 +95,8 @@ else
     git -C "${VIBE_DIR}" fetch origin 2>&1 | tee -a "${LOG_FILE}"
 fi
 
-if [ "${VIBE_COMMIT}" != "HEAD" ]; then
-    log "  Pinning to commit: ${VIBE_COMMIT}"
-    git -C "${VIBE_DIR}" checkout "${VIBE_COMMIT}" 2>&1 | tee -a "${LOG_FILE}"
-else
-    log "  ⚠  VIBE_COMMIT=HEAD — build is not fully reproducible."
-    log "  ⚠  After a successful install, record the commit:"
-    log "  ⚠    git -C VibeVoice rev-parse HEAD"
-fi
+log "  Pinning to commit: ${VIBE_COMMIT}"
+git -C "${VIBE_DIR}" checkout "${VIBE_COMMIT}" 2>&1 | tee -a "${LOG_FILE}"
 
 ACTUAL_COMMIT="$(git -C "${VIBE_DIR}" rev-parse HEAD)"
 log "  Actual commit: ${ACTUAL_COMMIT}"
@@ -146,6 +151,7 @@ pip install \
     "fastapi>=0.115" \
     "uvicorn[standard]>=0.29" \
     "python-multipart>=0.0.9" \
+    "aiofiles>=23.0" \
     2>&1 | tee -a "${LOG_FILE}"
 
 # Hard-check transformers version — a wrong version causes cryptic errors later
@@ -194,6 +200,7 @@ if ls "${VOICES_SRC}"/*.{wav,mp3,flac,ogg} 2>/dev/null | grep -q .; then
     log "  ${COUNT} voice file(s) copied."
 else
     log "  No custom voices in ${VOICES_SRC}/ — add .wav/.mp3 files before generating."
+    log "  You can also upload voices via the browser UI after the server starts."
 fi
 
 # ── Step 7 — Download model ───────────────────────────────────────────────────
@@ -230,10 +237,32 @@ log ""
 log "[9/9] Final environment report (verify.py)..."
 python "${SCRIPT_DIR}/verify.py" 2>&1 | tee -a "${LOG_FILE}"
 
+# ── Resolve public IP ─────────────────────────────────────────────────────────
+SERVER_PORT="${PORT:-8000}"
+SERVER_IP=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null \
+    || curl -s --max-time 3 http://checkip.amazonaws.com 2>/dev/null \
+    || hostname -I 2>/dev/null | awk '{print $1}' \
+    || echo "localhost")
+
 log ""
 log "=================================================="
-log "  Installation complete!"
+log "  ✅ Installation complete!"
 log "  Log saved to: ${LOG_FILE}"
+log ""
+log "  Server running on:"
+log "    http://${SERVER_IP}:${SERVER_PORT}"
+log ""
+log "  Endpoints:"
+log "    GET  /health"
+log "    GET  /voices"
+log "    GET  /ui                   (browser UI)"
+log "    POST /generate"
+log "    POST /generate_url"
+log "    POST /batch_generate"
+log "    POST /upload_voice"
+log ""
+log "  Quick test:"
+log "    curl http://${SERVER_IP}:${SERVER_PORT}/health"
 log ""
 log "  Batch generation (CLI):"
 log "    python batch_generate.py --list_voices"
@@ -242,9 +271,14 @@ log "      --input_dir  /path/to/txts \\"
 log "      --output_dir /path/to/output \\"
 log "      --speaker    Alice"
 log ""
-log "  API server:"
+log "  Start server manually:"
 log "    bash start_server.sh"
-log "    # then in another terminal or via SSH tunnel:"
-log "    curl http://localhost:8080/health"
-log "    python client_example.py"
 log "=================================================="
+
+# ── Auto-start server ─────────────────────────────────────────────────────────
+if [ "${START_SERVER}" = "1" ]; then
+    log ""
+    log "  --start-server flag detected — starting API server now..."
+    log ""
+    exec bash "${SCRIPT_DIR}/start_server.sh"
+fi

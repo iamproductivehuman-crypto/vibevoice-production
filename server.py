@@ -6,24 +6,40 @@ memory for the lifetime of the process, and serves HTTP generation
 requests without ever reloading weights.
 
 Start:
-    uvicorn server:app --host 0.0.0.0 --port 8080 --workers 1
+    uvicorn server:app --host 0.0.0.0 --port 8000 --workers 1
 
 Or use the helper script:
     bash start_server.sh
 
+Environment variables:
+    API_KEY                   — if set, all generation endpoints require
+                                X-API-Key header with this value
+    PORT                      — listen port (default 8000, used by __main__)
+    VIBEVOICE_MODEL           — HuggingFace model ID (default: microsoft/VibeVoice-1.5B)
+    VIBEVOICE_VOICES          — path to voices directory
+    VIBEVOICE_OUTPUT          — path to output directory
+    VIBEVOICE_DEFAULT_VOICE   — default voice stem name
+    VIBEVOICE_CFG_SCALE       — default CFG scale (default: 1.32)
+    VIBEVOICE_DDPM_STEPS      — default DDPM steps (default: 10)
+    CLEANUP_RETENTION_HOURS   — hours before output files are deleted (default: 24)
+    CLEANUP_INTERVAL_S        — cleanup scan interval in seconds (default: 3600)
+
 Endpoints:
-    GET  /health            liveness + GPU stats
+    GET  /health            liveness + GPU stats + queue info
     GET  /voices            list available voice files
+    POST /upload_voice      upload a custom .wav voice file
     POST /generate          synthesise → stream WAV bytes back
     POST /generate_url      synthesise → save file → return JSON + URL
     POST /batch_generate    multiple texts in one call → JSON array of URLs
     GET  /files/{filename}  download a previously generated file
+    GET  /ui                browser UI (static/index.html)
 """
 
 import asyncio
 import io
 import logging
 import os
+import shutil
 import sys
 import time
 import uuid
@@ -34,7 +50,14 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -54,6 +77,7 @@ log = logging.getLogger("vibevoice-api")
 # ---------------------------------------------------------------------------
 SCRIPT_DIR  = Path(__file__).parent.resolve()
 VIBE_DIR    = SCRIPT_DIR / "VibeVoice"
+STATIC_DIR  = SCRIPT_DIR / "static"
 
 # Make the VibeVoice package importable
 if str(VIBE_DIR) not in sys.path:
@@ -69,7 +93,12 @@ DEFAULT_CFG_SCALE = float(os.getenv("VIBEVOICE_CFG_SCALE",  "1.32"))
 DEFAULT_DDPM_STEPS = int(os.getenv("VIBEVOICE_DDPM_STEPS",  "10"))
 SAMPLE_RATE       = 24_000   # VibeVoice native output sample rate
 
+# API key authentication (optional — leave unset to disable)
+API_KEY = os.getenv("API_KEY", "").strip() or None
+
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+VOICES_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Global model state  — populated once in lifespan startup
@@ -79,6 +108,23 @@ _processor = None
 # asyncio.Lock() serialises requests so only one inference runs at a time
 # (single GPU — concurrency inside PyTorch is already maximised per request)
 _lock: asyncio.Lock | None = None
+_queue_depth: int = 0          # tracks how many requests are waiting
+_start_time: float = 0.0       # server start timestamp
+
+
+# ---------------------------------------------------------------------------
+# API key dependency
+# ---------------------------------------------------------------------------
+async def require_api_key(x_api_key: str = Header(default="")) -> None:
+    """FastAPI dependency — enforces API key if API_KEY env var is set."""
+    if API_KEY is None:
+        return   # auth disabled
+    if x_api_key != API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key. Set X-API-Key header.",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -86,16 +132,22 @@ _lock: asyncio.Lock | None = None
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _model, _processor, _lock
+    global _model, _processor, _lock, _start_time
 
     _lock = asyncio.Lock()
+    _start_time = time.time()
 
     log.info("=" * 60)
     log.info("  VibeVoice API — starting up")
     log.info(f"  Model:      {MODEL_PATH}")
     log.info(f"  Voices dir: {VOICES_DIR}")
     log.info(f"  Output dir: {OUTPUT_DIR}")
+    log.info(f"  Auth:       {'enabled' if API_KEY else 'disabled (no API_KEY set)'}")
     log.info("=" * 60)
+
+    # Start background cleanup daemon
+    from cleanup import start_cleanup_daemon
+    start_cleanup_daemon(OUTPUT_DIR)
 
     t0 = time.time()
     try:
@@ -144,12 +196,16 @@ app = FastAPI(
         "Single-GPU TTS server. Model stays resident in VRAM. "
         "One RTX 4090 can serve continuous generation requests."
     ),
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
 # Serve persisted WAV files for /generate_url and /batch_generate
 app.mount("/files", StaticFiles(directory=str(OUTPUT_DIR)), name="files")
+
+# Serve browser UI from static/
+if STATIC_DIR.is_dir() and list(STATIC_DIR.iterdir()):
+    app.mount("/ui", StaticFiles(directory=str(STATIC_DIR), html=True), name="ui")
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +237,7 @@ class BatchItem(BaseModel):
 
 
 class BatchGenerateRequest(BaseModel):
-    items: list[BatchItem] = Field(..., min_length=1, max_length=100)
+    items: list[BatchItem] = Field(..., min_length=1, max_length=500)
 
 
 class BatchResultItem(BaseModel):
@@ -326,18 +382,35 @@ def _save_audio(audio_np: np.ndarray, filename: str) -> Path:
 # Routes — meta
 # ---------------------------------------------------------------------------
 
-@app.get("/health", tags=["meta"], summary="Liveness + GPU stats")
+@app.get("/health", tags=["meta"], summary="Liveness + GPU stats + queue info")
 async def health():
-    if _model is None:
-        raise HTTPException(503, "Model not loaded yet.")
+    """
+    Always public (no API key required).
+    Returns model status, GPU info, uptime, and current queue depth.
+    """
+    uptime_s = round(time.time() - _start_time, 1) if _start_time else 0
+    if not torch.cuda.is_available():
+        return {
+            "status":        "ok",
+            "model_loaded":  _model is not None,
+            "gpu_name":      None,
+            "vram_used_gb":  None,
+            "vram_total_gb": None,
+            "uptime_s":      uptime_s,
+            "queue_length":  _queue_depth,
+        }
     vram_used  = torch.cuda.memory_allocated() / 1e9
     vram_total = torch.cuda.get_device_properties(0).total_memory / 1e9
     return {
         "status":        "ok",
+        "model_loaded":  _model is not None,
         "model":         MODEL_PATH,
-        "gpu":           torch.cuda.get_device_name(0),
+        "gpu_name":      torch.cuda.get_device_name(0),
         "vram_used_gb":  round(vram_used,  2),
         "vram_total_gb": round(vram_total, 2),
+        "vram_free_gb":  round(vram_total - vram_used, 2),
+        "uptime_s":      uptime_s,
+        "queue_length":  _queue_depth,
         "voices_dir":    str(VOICES_DIR),
         "output_dir":    str(OUTPUT_DIR),
     }
@@ -345,10 +418,47 @@ async def health():
 
 @app.get("/voices", tags=["meta"], summary="List available voice files")
 async def list_voices():
+    """Always public. Returns all .wav stems in VOICES_DIR."""
     voices = sorted(p.stem for p in VOICES_DIR.glob("*.wav"))
-    if not voices:
-        raise HTTPException(404, f"No voices found in {VOICES_DIR}")
     return {"voices": voices, "count": len(voices)}
+
+
+@app.post(
+    "/upload_voice",
+    tags=["meta"],
+    summary="Upload a custom .wav voice file",
+    dependencies=[Depends(require_api_key)],
+)
+async def upload_voice(file: UploadFile = File(...)):
+    """
+    Upload a .wav file to the voices directory.
+    The new voice is immediately available for generation.
+    Requires API key if API_KEY is set.
+    """
+    if not file.filename:
+        raise HTTPException(400, "No filename provided.")
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in {".wav", ".mp3", ".flac", ".ogg"}:
+        raise HTTPException(400, f"Unsupported audio format: {suffix}. Use .wav/.mp3/.flac/.ogg")
+
+    # Sanitize filename
+    safe_name = "".join(
+        c if c.isalnum() or c in "-_." else "_"
+        for c in file.filename
+    )
+    dest = VOICES_DIR / safe_name
+    content = await file.read()
+    dest.write_bytes(content)
+    log.info(f"Voice uploaded: {safe_name} ({len(content) // 1024} KB)")
+
+    voices = sorted(p.stem for p in VOICES_DIR.glob("*.wav"))
+    return {
+        "uploaded":   safe_name,
+        "stem":       Path(safe_name).stem,
+        "size_kb":    round(len(content) / 1024, 1),
+        "voices":     voices,
+        "count":      len(voices),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -360,36 +470,43 @@ async def list_voices():
     tags=["generation"],
     summary="Synthesise text → stream WAV bytes back directly",
     response_class=StreamingResponse,
+    dependencies=[Depends(require_api_key)],
 )
 async def generate(req: GenerateRequest):
     """
     Generate speech and return the WAV file as a streaming response.
     Nothing is written to disk. The client receives a complete WAV file.
+    Requests queue automatically — they wait rather than fail.
     """
+    global _queue_depth
     if _model is None:
         raise HTTPException(503, "Model not loaded.")
 
     voice_path = _resolve_voice(req.voice)
     t0 = time.time()
 
-    async with _lock:
-        log.info(
-            f"/generate  voice={req.voice}  cfg={req.cfg_scale}  "
-            f"steps={req.ddpm_steps}  "
-            f"text={req.text[:70]!r}{'…' if len(req.text) > 70 else ''}"
-        )
-        try:
-            audio_np = await asyncio.get_event_loop().run_in_executor(
-                None,
-                _run_inference,
-                req.text, voice_path, req.cfg_scale, req.ddpm_steps,
+    _queue_depth += 1
+    try:
+        async with _lock:
+            log.info(
+                f"/generate  voice={req.voice}  cfg={req.cfg_scale}  "
+                f"steps={req.ddpm_steps}  "
+                f"text={req.text[:70]!r}{'…' if len(req.text) > 70 else ''}"
             )
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            raise HTTPException(507, "CUDA out of memory. Try shorter text or restart server.")
-        except Exception as exc:
-            log.error(f"Inference error: {exc}", exc_info=True)
-            raise HTTPException(500, f"Inference failed: {exc}")
+            try:
+                audio_np = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    _run_inference,
+                    req.text, voice_path, req.cfg_scale, req.ddpm_steps,
+                )
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                raise HTTPException(507, "CUDA out of memory. Try shorter text or restart server.")
+            except Exception as exc:
+                log.error(f"Inference error: {exc}", exc_info=True)
+                raise HTTPException(500, f"Inference failed: {exc}")
+    finally:
+        _queue_depth -= 1
 
     wav_bytes = _audio_to_wav_bytes(audio_np)
     elapsed   = time.time() - t0
@@ -416,12 +533,15 @@ async def generate(req: GenerateRequest):
     "/generate_url",
     tags=["generation"],
     summary="Synthesise text → save file → return JSON with download URL",
+    dependencies=[Depends(require_api_key)],
 )
 async def generate_url(req: GenerateRequest):
     """
     Generate speech, save it to disk, and return a JSON body containing
     a /files/{filename} download URL. Useful for async or polling workflows.
+    Requests queue automatically — they wait rather than fail.
     """
+    global _queue_depth
     if _model is None:
         raise HTTPException(503, "Model not loaded.")
 
@@ -430,20 +550,24 @@ async def generate_url(req: GenerateRequest):
     filename   = f"{file_id}.wav"
     t0         = time.time()
 
-    async with _lock:
-        log.info(f"/generate_url  voice={req.voice}  id={file_id}")
-        try:
-            audio_np = await asyncio.get_event_loop().run_in_executor(
-                None,
-                _run_inference,
-                req.text, voice_path, req.cfg_scale, req.ddpm_steps,
-            )
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            raise HTTPException(507, "CUDA out of memory.")
-        except Exception as exc:
-            log.error(f"Inference error: {exc}", exc_info=True)
-            raise HTTPException(500, f"Inference failed: {exc}")
+    _queue_depth += 1
+    try:
+        async with _lock:
+            log.info(f"/generate_url  voice={req.voice}  id={file_id}")
+            try:
+                audio_np = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    _run_inference,
+                    req.text, voice_path, req.cfg_scale, req.ddpm_steps,
+                )
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                raise HTTPException(507, "CUDA out of memory.")
+            except Exception as exc:
+                log.error(f"Inference error: {exc}", exc_info=True)
+                raise HTTPException(500, f"Inference failed: {exc}")
+    finally:
+        _queue_depth -= 1
 
     out_path  = _save_audio(audio_np, filename)
     elapsed   = time.time() - t0
@@ -467,13 +591,16 @@ async def generate_url(req: GenerateRequest):
     tags=["generation"],
     summary="Synthesise multiple texts in one call → array of file URLs",
     response_model=BatchGenerateResponse,
+    dependencies=[Depends(require_api_key)],
 )
 async def batch_generate(req: BatchGenerateRequest):
     """
     Process a list of items sequentially (single GPU, one job at a time).
     All outputs are saved to OUTPUT_DIR. Response contains a URL for each.
     Failed items are included with error set rather than aborting the batch.
+    Supports up to 500 items per call.
     """
+    global _queue_depth
     if _model is None:
         raise HTTPException(503, "Model not loaded.")
 
@@ -499,36 +626,40 @@ async def batch_generate(req: BatchGenerateRequest):
             continue
 
         t0 = time.time()
-        async with _lock:
-            log.info(
-                f"/batch_generate [{idx+1}/{len(req.items)}]  "
-                f"voice={item.voice}  text={item.text[:60]!r}"
-            )
-            try:
-                audio_np = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    _run_inference,
-                    item.text, voice_path, item.cfg_scale, item.ddpm_steps,
+        _queue_depth += 1
+        try:
+            async with _lock:
+                log.info(
+                    f"/batch_generate [{idx+1}/{len(req.items)}]  "
+                    f"voice={item.voice}  text={item.text[:60]!r}"
                 )
-            except torch.cuda.OutOfMemoryError:
-                torch.cuda.empty_cache()
-                err = "CUDA OOM — item skipped; cache cleared"
-                log.error(f"  [{idx}] {err}")
-                results.append(BatchResultItem(
-                    index=idx, filename=filename, url="",
-                    duration_s=0, generation_s=0, size_kb=0, error=err,
-                ))
-                failed += 1
-                continue
-            except Exception as exc:
-                err = str(exc)
-                log.error(f"  [{idx}] Inference error: {err}", exc_info=True)
-                results.append(BatchResultItem(
-                    index=idx, filename=filename, url="",
-                    duration_s=0, generation_s=0, size_kb=0, error=err,
-                ))
-                failed += 1
-                continue
+                try:
+                    audio_np = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        _run_inference,
+                        item.text, voice_path, item.cfg_scale, item.ddpm_steps,
+                    )
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    err = "CUDA OOM — item skipped; cache cleared"
+                    log.error(f"  [{idx}] {err}")
+                    results.append(BatchResultItem(
+                        index=idx, filename=filename, url="",
+                        duration_s=0, generation_s=0, size_kb=0, error=err,
+                    ))
+                    failed += 1
+                    continue
+                except Exception as exc:
+                    err = str(exc)
+                    log.error(f"  [{idx}] Inference error: {err}", exc_info=True)
+                    results.append(BatchResultItem(
+                        index=idx, filename=filename, url="",
+                        duration_s=0, generation_s=0, size_kb=0, error=err,
+                    ))
+                    failed += 1
+                    continue
+        finally:
+            _queue_depth -= 1
 
         out_path  = _save_audio(audio_np, filename)
         elapsed   = time.time() - t0
@@ -559,4 +690,5 @@ async def batch_generate(req: BatchGenerateRequest):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8080, workers=1, reload=False)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("server:app", host="0.0.0.0", port=port, workers=1, reload=False)
